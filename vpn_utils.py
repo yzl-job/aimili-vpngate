@@ -376,6 +376,10 @@ def save_ip_cache(cache: dict[str, dict[str, Any]]) -> None:
         except Exception:
             pass
 
+def location_is_russia(location: Any) -> bool:
+    text = str(location or "")
+    return "俄罗斯" in text or "Russia" in text
+
 def enrich_ip_info(nodes: list[dict[str, Any]]) -> None:
     # 1. Read cache thread-safely
     with ip_cache_lock:

@@ -1378,6 +1378,9 @@ def test_node_by_id(node_id: str) -> dict[str, Any]:
     }
     if ok:
         vpn_utils.enrich_ip_info([temp_node])
+        if vpn_utils.location_is_russia(temp_node.get("location")):
+            ok = False
+            message = f"[已过滤] 节点物理位置为俄罗斯，已按配置排除。(原探测结果: {message})"
 
     with lock:
         nodes = read_nodes()
@@ -1387,14 +1390,14 @@ def test_node_by_id(node_id: str) -> dict[str, Any]:
             node["probe_status"] = "available" if ok else "unavailable"
             node["probe_message"] = message
             node["probed_at"] = time.time()
-            if ok:
+            if temp_node.get("location"):
                 node["owner"] = temp_node["owner"]
                 node["asn"] = temp_node["asn"]
                 node["as_name"] = temp_node["as_name"]
                 node["location"] = temp_node["location"]
                 node["ip_type"] = temp_node["ip_type"]
                 node["quality"] = temp_node["quality"]
-            
+
             sorted_nodes = sort_all_nodes(nodes)
             write_json(NODES_FILE, sorted_nodes)
             res = next((item for item in sorted_nodes if item.get("id") == node_id), node)
@@ -1505,6 +1508,10 @@ def test_multiple_nodes(node_ids: list[str]) -> list[dict[str, Any]]:
             vpn_utils.enrich_ip_info(successful_nodes)
         except Exception as ee:
             print(f"[test_multiple_nodes] 批量富化 IP 失败: {ee}", flush=True)
+        for res in successful_nodes:
+            if vpn_utils.location_is_russia(res.get("location")):
+                res["probe_status"] = "unavailable"
+                res["probe_message"] = f"[已过滤] 节点物理位置为俄罗斯，已按配置排除。(原探测结果: {res.get('probe_message')})"
 
     with lock:
         current_nodes = read_nodes()
