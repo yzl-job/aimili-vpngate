@@ -82,15 +82,7 @@ fi
 
 # 4. Clone or pull the repository
 INSTALL_DIR="/opt/aimilivpn"
-# 默认部署分支（在 bate 分支设为 bate；在 main 分支设为 main）
-DEFAULT_DEPLOY_BRANCH="main"
-
-# 自动检测本地已安装版本当前所在的分支
-CURRENT_BRANCH=""
-if [ -d "${INSTALL_DIR}/.git" ]; then
-    CURRENT_BRANCH=$(cd "${INSTALL_DIR}" && git rev-parse --abbrev-ref HEAD 2>/dev/null)
-fi
-DEPLOY_BRANCH="${CURRENT_BRANCH:-$DEFAULT_DEPLOY_BRANCH}"
+DEPLOY_BRANCH="main"
 
 echo -e "\n${YELLOW}[2/4] 正在从 GitHub 部署源代码到 ${INSTALL_DIR} (目标分支: ${DEPLOY_BRANCH})...${PLAIN}"
 if [ -f "${INSTALL_DIR}/.local_dev" ]; then
@@ -99,8 +91,8 @@ else
     if [ -d "${INSTALL_DIR}" ]; then
         echo -e "  -> 目录 ${INSTALL_DIR} 已存在，正在更新并强制覆盖本地源码..."
         cd "${INSTALL_DIR}"
-        git fetch --all || true
-        git checkout "${DEPLOY_BRANCH}" || git checkout -b "${DEPLOY_BRANCH}" "origin/${DEPLOY_BRANCH}" || true
+        git fetch origin "${DEPLOY_BRANCH}" || true
+        git checkout -B "${DEPLOY_BRANCH}" "origin/${DEPLOY_BRANCH}" || true
         echo -e "  -> 正在强制重置本地源码至 origin/${DEPLOY_BRANCH} ..."
         if git reset --hard "origin/${DEPLOY_BRANCH}"; then
             echo -e "${GREEN}  -> 源码更新成功！${PLAIN}"
@@ -113,13 +105,14 @@ else
         fi
     else
         echo -e "  -> 正在克隆 GitHub 仓库 ${GITHUB_URL} (分支: ${DEPLOY_BRANCH}) ..."
-        if git clone -b "${DEPLOY_BRANCH}" "${GITHUB_URL}" "${INSTALL_DIR}"; then
+        if git clone --branch "${DEPLOY_BRANCH}" --single-branch "${GITHUB_URL}" "${INSTALL_DIR}"; then
             echo -e "${GREEN}  -> 克隆成功！${PLAIN}"
         else
             echo -e "  -> 尝试默认克隆..."
             if git clone "${GITHUB_URL}" "${INSTALL_DIR}"; then
                 cd "${INSTALL_DIR}"
-                git checkout "${DEPLOY_BRANCH}" || git checkout -b "${DEPLOY_BRANCH}" "origin/${DEPLOY_BRANCH}" || true
+                git fetch origin "${DEPLOY_BRANCH}"
+                git checkout -B "${DEPLOY_BRANCH}" "origin/${DEPLOY_BRANCH}"
                 echo -e "${GREEN}  -> 克隆成功！${PLAIN}"
             else
                 echo -e "${RED}  -> 错误: 无法克隆仓库 ${GITHUB_URL}，请检查网络！${PLAIN}"
@@ -144,6 +137,7 @@ WorkingDirectory=${INSTALL_DIR}
 ExecStart=/usr/bin/python3 vpngate_manager.py
 Restart=always
 RestartSec=5
+Environment=DEPLOYMENT_MODE=source
 EnvironmentFile=-/etc/default/aimilivpn
 
 [Install]
@@ -192,18 +186,27 @@ INSTALL_DIR = "/opt/aimilivpn"
 LOG_FILE = "/opt/aimilivpn/vpngate_data/vpngate.log"
 
 def generate_random_password():
-    import random
+    import secrets
     import string
     chars = string.ascii_letters + string.digits
     while True:
-        pwd = "".join(random.choices(chars, k=12))
+        pwd = "".join(secrets.choice(chars) for _ in range(12))
         if any(c.islower() for c in pwd) and any(c.isupper() for c in pwd) and any(c.isdigit() for c in pwd):
             return pwd
 
 def generate_random_suffix():
-    import random
+    import secrets
     import string
-    return "".join(random.choices(string.ascii_letters + string.digits, k=12))
+    chars = string.ascii_letters + string.digits
+    return "".join(secrets.choice(chars) for _ in range(12))
+
+def get_app_version():
+    try:
+        with open(os.path.join(INSTALL_DIR, "VERSION"), "r", encoding="utf-8") as f:
+            version = f.read().strip().lstrip("vV")
+        return version or "2.1.5"
+    except Exception:
+        return "2.1.5"
 
 def load_ui_cfg():
     import json
@@ -224,8 +227,11 @@ def save_ui_cfg(cfg):
     path = "/opt/aimilivpn/vpngate_data/ui_auth.json"
     os.makedirs(os.path.dirname(path), exist_ok=True)
     try:
+        if os.path.exists(path):
+            os.chmod(path, 0o600)
         with open(path, "w", encoding="utf-8") as f:
             json.dump(cfg, f, ensure_ascii=False, indent=2)
+        os.chmod(path, 0o600)
         return True
     except Exception:
         return False
@@ -412,7 +418,7 @@ def print_status():
         openvpn_status = f"{green}[已连接]{reset}" if openvpn_ok else f"{red}[未连接]{reset}"
     
     print_line("=======================================================")
-    print_line(f"               {bold}AimiliVPN 管理终端 v2.0{reset}                  ")
+    print_line(f"               {bold}AimiliVPN 管理终端 v{get_app_version()}{reset}                ")
     print_line("=======================================================")
     print_line("【核心服务状态】")
     print_line(format_line(f"代理网关 (Port {proxy_port})", gateway_status))
@@ -516,7 +522,7 @@ def show_logs():
         time.sleep(2)
 
 def update_service():
-    print("正在获取远程更新并检测版本...", flush=True)
+    print("正在从 GitHub main 主分支检测正式版更新...", flush=True)
     if os.path.exists(INSTALL_DIR):
         try:
             os.chdir(INSTALL_DIR)
@@ -525,20 +531,13 @@ def update_service():
                 time.sleep(3)
                 return
             
-            # Fetch remote origin updates
-            subprocess.run(["git", "fetch", "--all"], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            
-            # Detect remote branch (prefer current local branch, fallback to origin/main or origin/master)
-            curr = subprocess.run(["git", "rev-parse", "--abbrev-ref", "HEAD"], capture_output=True, text=True)
-            branch = curr.stdout.strip() if curr.returncode == 0 else ""
-            if not branch or branch == "HEAD":
-                branch = "main"
-                for b in ["main", "master"]:
-                    chk = subprocess.run(["git", "rev-parse", "--verify", f"origin/{b}"], capture_output=True, text=True)
-                    if chk.returncode == 0:
-                        branch = b
-                        break
-            
+            branch = "main"
+            subprocess.run(
+                ["git", "fetch", "origin", branch],
+                check=True,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
             local_commit = subprocess.run(["git", "rev-parse", "HEAD"], capture_output=True, text=True).stdout.strip()
             remote_commit = subprocess.run(["git", "rev-parse", f"origin/{branch}"], capture_output=True, text=True).stdout.strip()
             
@@ -557,7 +556,8 @@ def update_service():
                     time.sleep(1.5)
                     return
             
-            print(f"\n正在强制重置本地代码至 origin/{branch} ...", flush=True)
+            print(f"\n正在切换并重置到正式版 origin/{branch} ...", flush=True)
+            subprocess.run(["git", "checkout", "-B", branch, f"origin/{branch}"], check=True)
             subprocess.run(["git", "reset", "--hard", f"origin/{branch}"], check=True)
             
             # Clean up python cache files
@@ -582,10 +582,12 @@ def uninstall_service():
         stop_service()
         if shutil.which("systemctl"):
             subprocess.run(["systemctl", "disable", "aimilivpn.service"])
-            try:
-                os.unlink("/lib/systemd/system/aimilivpn.service")
-            except Exception:
-                pass
+            for unit_path in ("/lib/systemd/system/aimilivpn.service", "/etc/systemd/system/aimilivpn.service"):
+                try:
+                    os.unlink(unit_path)
+                except FileNotFoundError:
+                    pass
+            subprocess.run(["systemctl", "daemon-reload"], check=False)
         elif shutil.which("rc-service"):
             subprocess.run(["rc-update", "del", "aimilivpn"])
             try:
@@ -594,9 +596,25 @@ def uninstall_service():
                 pass
         try:
             os.unlink("/usr/bin/ml")
-        except Exception:
+        except FileNotFoundError:
             pass
-        subprocess.run(["rm", "-rf", INSTALL_DIR])
+        if shutil.which("ip"):
+            subprocess.run(["ip", "route", "flush", "table", "100"], check=False)
+            while subprocess.run(
+                ["ip", "rule", "del", "table", "100"],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                check=False,
+            ).returncode == 0:
+                pass
+        try:
+            os.unlink("/etc/sysctl.d/99-aimilivpn.conf")
+        except FileNotFoundError:
+            pass
+        if shutil.which("sysctl"):
+            subprocess.run(["sysctl", "--system"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
+        if os.path.realpath(INSTALL_DIR) == "/opt/aimilivpn" and os.path.isdir(INSTALL_DIR):
+            shutil.rmtree(INSTALL_DIR)
         print("AimiliVPN 已卸载！")
         sys.exit(0)
     else:
@@ -740,7 +758,7 @@ def configure_credentials():
             new_uname = input(f"请输入新管理账号 (回车默认 {curr_uname}): ").strip()
             if not new_uname:
                 new_uname = curr_uname
-            new_pwd = input("请输入新管理密码 (不能为空): ").strip()
+            new_pwd = input("请输入新管理密码 (不能为空): ")
             if not new_pwd:
                 print("错误: 密码不能为空！")
                 time.sleep(2)
@@ -967,7 +985,7 @@ mkdir -p "${INSTALL_DIR}/vpngate_data"
 
 is_custom="n"
 if [ ! -f "$AUTH_FILE" ]; then
-    if [ -t 0 ]; then
+    if [ -t 0 ] && [ "${AIMILIVPN_NONINTERACTIVE:-0}" != "1" ]; then
         echo -e "\n${YELLOW}检测到是首次安装，是否需要自定义配置网页端参数（端口/安全后缀/登录账号密码）？${PLAIN}"
         read -p "是否自定义配置？[y/N]: " is_custom
     else
@@ -977,22 +995,22 @@ if [ ! -f "$AUTH_FILE" ]; then
     # Initialize defaults
     UI_PORT=8787
     # generate random secret suffix (12 chars alphanumeric)
-    SECRET_PATH=$(python3 -c "import random, string; print(''.join(random.choices(string.ascii_letters + string.digits, k=12)))")
+    SECRET_PATH=$(python3 -c "import secrets, string; chars = string.ascii_letters + string.digits; print(''.join(secrets.choice(chars) for _ in range(12)))")
     # generate random password
     UI_PASSWORD=$(python3 -c "
-import random, string
+import secrets, string
 chars = string.ascii_letters + string.digits
 while True:
-    pwd = ''.join(random.choices(chars, k=12))
+    pwd = ''.join(secrets.choice(chars) for _ in range(12))
     if any(c.islower() for c in pwd) and any(c.isupper() for c in pwd) and any(c.isdigit() for c in pwd):
         print(pwd)
         break
 ")
     UI_USERNAME=$(python3 -c "
-import random, string
+import secrets, string
 chars = string.ascii_letters + string.digits
 while True:
-    uname = ''.join(random.choices(chars, k=12))
+    uname = ''.join(secrets.choice(chars) for _ in range(12))
     if uname[0].isalpha() and any(c.islower() for c in uname) and any(c.isupper() for c in uname) and any(c.isdigit() for c in uname):
         print(uname)
         break
@@ -1053,6 +1071,7 @@ while True:
     # when username/password contain quotes, backslashes, or shell metacharacters.
     python3 - "$AUTH_FILE" "$UI_PORT" "$SECRET_PATH" "$UI_USERNAME" "$UI_PASSWORD" <<'PY'
 import json
+import os
 import sys
 
 auth_file, ui_port, secret_path, username, password = sys.argv[1:6]
@@ -1064,10 +1083,12 @@ cfg = {
     "username": username,
     "password": password,
 }
-with open(auth_file, "w", encoding="utf-8") as f:
+fd = os.open(auth_file, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+with os.fdopen(fd, "w", encoding="utf-8") as f:
     json.dump(cfg, f, ensure_ascii=False, indent=2)
 PY
 fi
+chmod 600 "$AUTH_FILE"
 
 # 8. Start service
 # 8.5 Optimize network parameters (rp_filter for policy routing)
@@ -1101,6 +1122,22 @@ if [ -d "/proc/sys/net/ipv4/conf" ]; then
 fi
 
 echo -e "\n正在启动 AimiliVPN 服务并初始化网络..."
+# Avoid treating the previous process' persisted node ID as a successful new
+# connection during upgrades. The service will replace this startup state.
+if [ -f "${INSTALL_DIR}/vpngate_data/state.json" ]; then
+    python3 - "${INSTALL_DIR}/vpngate_data/state.json" <<'PY' 2>/dev/null || true
+import json
+import sys
+from pathlib import Path
+
+state_path = Path(sys.argv[1])
+state = json.loads(state_path.read_text(encoding="utf-8"))
+state["active_openvpn_node_id"] = ""
+state["is_connecting"] = True
+state["last_check_message"] = "服务正在重启并重新建立加密通道..."
+state_path.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
+PY
+fi
 if command -v systemctl >/dev/null 2>&1; then
     systemctl restart aimilivpn.service || true
 elif command -v rc-service >/dev/null 2>&1; then
@@ -1108,7 +1145,7 @@ elif command -v rc-service >/dev/null 2>&1; then
 fi
 
 # Wait and poll for node loading and active connection
-echo -e "\n正在等待 AimiliVPN 首次获取节点并建立加密通道 (此过程可能需要 5-30 秒)..."
+echo -e "\n正在等待 AimiliVPN 首次获取节点并建立加密通道 (此过程可能需要 5-90 秒)..."
 ACTIVE_ID=""
 LAST_MSG=""
 for i in {1..90}; do
@@ -1118,7 +1155,7 @@ for i in {1..90}; do
         CUR_MSG=$(python3 -c "import json; print(json.load(open('${INSTALL_DIR}/vpngate_data/state.json')).get('last_check_message', ''))" 2>/dev/null || echo "")
         
         if [ "$IS_CONN" = "False" ] || [ "$IS_CONN" = "false" ]; then
-            if [ -n "$ACTIVE_ID" ]; then
+            if [ -n "$ACTIVE_ID" ] && ip link show dev tun0 >/dev/null 2>&1 && pidof openvpn >/dev/null 2>&1; then
                 echo -e "  -> ${GREEN}[已就绪]${PLAIN} 首次节点连接成功，活动节点: ${GREEN}$ACTIVE_ID${PLAIN}"
                 break
             else
@@ -1174,7 +1211,7 @@ if [ -n "$PUBLIC_IPV6" ]; then
 fi
 echo -e "  * 网页管理账号:  ${YELLOW}${USERNAME}${PLAIN}"
 echo -e "  * 网页管理密码:  ${YELLOW}${PASSWORD}${PLAIN}"
-echo -e "  * HTTP/SOCKS5 代理端口:  ${BLUE}http://127.0.0.1:${PROXY_PORT}/${PLAIN}  或  ${BLUE}http://[::1]:${PROXY_PORT}/${PLAIN}"
+echo -e "  * HTTP/SOCKS5 代理端口:  ${BLUE}http://127.0.0.1:${PROXY_PORT}/${PLAIN}"
 echo -e " --------------------------------------------------------"
 echo -e "  * 快速状态指令:   ${YELLOW}ml status${PLAIN}  或  ${YELLOW}ml${PLAIN}"
 echo -e "  * 查看实时日志:   ${YELLOW}ml logs${PLAIN}"

@@ -254,6 +254,9 @@ def socks5_client(client: socket.socket, first_byte: bytes) -> None:
                 return
             client.sendall(b"\x01\x00")
         else:
+            if 0 not in methods:
+                client.sendall(b"\x05\xff")
+                return
             client.sendall(b"\x05\x00")
         version, command, _, address_type = recv_exact(client, 4)
         if version != 5 or command != 1:
@@ -459,9 +462,9 @@ def start_proxy_server(host: str, port: int) -> None:
                     pass
                 continue
 
-            def run_client() -> None:
+            def run_client(client_socket: socket.socket = client, client_address: tuple[str, int] = address) -> None:
                 try:
-                    proxy_client(client, address)
+                    proxy_client(client_socket, client_address)
                 finally:
                     proxy_connection_sem.release()
 
